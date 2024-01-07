@@ -1,0 +1,19 @@
+---
+"1e:dd:cc:23":
+    name: "ffte"
+    packet_type:
+        RADIO_ERP1:
+            0xf0: "closed"
+            0xe0: "open"
+"05:22:f0:5a":
+    name: "ftkb schlaf1"
+    packet_type:
+        RADIO_ERP1:
+            0x09: "closed"
+            0x08: "open"
+"17:23:fa:16":
+    name: "ftkb Bad"
+    packet_type:
+        RADIO_ERP1:
+            0x09: "closed"
+            0x08: "open"

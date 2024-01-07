@@ -1,0 +1,7 @@
+client_id: enocean_pi
+mqtt_server: mqtt.server.com
+mqtt_port: 1883
+mqtt_username: enocean-gw
+mqtt_password: enoceanpasswerd
+sensors_file: "/home/user/enocean-gw/enocean_sensors.yml"
+enocean_device: "/dev/ttyAMA0"
