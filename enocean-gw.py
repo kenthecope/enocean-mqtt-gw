@@ -192,6 +192,8 @@ class EnoceanTelegram(object):
         self.crc8 = self.serial_device.read()
 
     def __str__(self):
+        if not self.data:
+            return ""
         output = ""
         output += "[DL   | ODL | PT | CRC8 |"
         for mybyte in self.data:
@@ -276,9 +278,13 @@ def main():
             if mybyte == sync_byte:
                 # print ("SYNC:", mybyte.hex())
                 telegram = EnoceanTelegram(ser)
-                telegram.read()
-                telegram.process()
-                sensors.process_telegram(telegram)
+                try:
+                    telegram.read()
+                    telegram.process()
+                    sensors.process_telegram(telegram)
+                except Exception as err:
+                    print (f"Telgram issue: {err}")
+                    #client.publish("enocean/crc8", f"{err}")
                 if sensors.mqtt_message.message:
                     print (telegram)
                     print ("PUBLISH:", sensors.mqtt_message.message[0], sensors.mqtt_message.message[1])
