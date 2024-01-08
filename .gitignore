@@ -166,4 +166,4 @@ enocean-gw-config.yml
 enocean_sensors.yml
 
 # vim swap files
-.swp
+*.swp
