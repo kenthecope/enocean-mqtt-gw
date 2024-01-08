@@ -10,6 +10,7 @@ import crc8
 import paho.mqtt.client as mqtt
 import yaml
 import argparse
+import sys
 
 # EnOcean sync byte
 sync_byte = b'\x55'
@@ -38,7 +39,6 @@ class MQTTmessage(object):
                 topic += f'/'
             return (topic, self.msg)
         return None
-
     
 
 class SensorParser(object):
@@ -56,15 +56,38 @@ class SensorParser(object):
         if telegram.packet.sender_id in self.sensors:
             sensor = self.sensors[telegram.packet.sender_id]
             if telegram.packet.packet_type in sensor['packet_type']:
+                # see if we match a configured sensor
+                if 'name' in sensor:
+                    sensor_name = sensor['name']
+                else:
+                    sensor_name = telegram.packet.sender_id.replace(":","")
                 if telegram.packet.telegram_data in sensor['packet_type'][telegram.packet.packet_type]:
-                    self.mqtt_message.sub_topic = sensor['name']
+                    self.mqtt_message.sub_topic = sensor_name
                     self.mqtt_message.msg = sensor['packet_type'][telegram.packet.packet_type][telegram.packet.telegram_data]
+                    return
+                # unkown value
+                self.mqtt_message.sub_topic = f"unknown_value/{sensor_name}"
+                self.mqtt_message.msg = f"{hex(telegram.packet.telegram_data)}"
+                return
+            # unkown packet type
+            if 'name' in sensor:
+                sensor_name = sensor['name']
+            else:
+                sensor_name = telegram.packet.sender_id.replace(":","")
+            self.mqtt_message.sub_topic = f"unknown_packet_type/{sensor_name}"
+            self.mqtt_message.msg = f"{telegram.packet.packet_type} from {telegram.packet.sender_id}"
+            return
+
+        # report a unknown sensor sending data
+        self.mqtt_message.sub_topic = 'unknown_sender'
+        self.mqtt_message.msg = f"{telegram.packet.sender_id}"
+        return
+
 
     @property
     def message(self):
         # return a tuple for MQTT, or a None if no message is ready
         return self.mqtt_message.message
-
 
 
 class RadioErp1(object):
@@ -130,11 +153,20 @@ class EnoceanTelegram(object):
     def read(self):
         # read in the telegram
         self.read_header()
-        self.verify_header_crc8()
+        try:
+            self.verify_header_crc8()
+        except:
+            print ("Telegram Header CRC8 Fail!")
+            raise Exception("CRC8 Failure in Header")
         self.read_data()
         self.read_optional_data()
         self.read_crc8()
         self.verify_crc8()
+        try:
+            self.verify_header_crc8()
+        except:
+            print ("Telegram CRC8 Fail!")
+            raise Exception("CRC8 Failure")
 
     def read_header(self):
         # read in the 4 byte header including the crc8
@@ -218,23 +250,28 @@ class EnoceanTelegram(object):
         raise Exception(f"Unknown Packet type: {self.packet_type.hex()}")
     
 def on_connect(client, userdata, flags, rc):
-    print("Connected with result code "+str(rc))
+    print("MQTT Connected with result code "+str(rc))
 
 def on_disconnect(client, userdata, rc):
     if rc != 0:
-        print("Unexpected disconnection.")
+        print("MQTT Unexpected disconnection.")
 
 # The callback for when a PUBLISH message is received from the server.
 def on_message(client, userdata, msg):
     print(msg.topic+" "+str(msg.payload))
 
 def main():
-    client.connect(config['mqtt_server'], config['mqtt_port'], 60)
+    try:
+        client.connect(config['mqtt_server'], config['mqtt_port'], 60)
+    except ConnectionRefusedError as err:
+        print (f"Connection Refused to {config['mqtt_server']} on port {config['mqtt_port']} - will auto reconnect")
     client.loop_start()
     client.publish("enocean/status", "UP")
     with serial.Serial(config['enocean_device'], 57200) as ser:
         while True:
             # listen for sync byte
+            if not client.is_connected():
+                print (f"WARNING: MQTT Connection {config['mqtt_server']}:{config['mqtt_port']} not active!")
             mybyte = ser.read()
             if mybyte == sync_byte:
                 # print ("SYNC:", mybyte.hex())
@@ -274,7 +311,7 @@ if __name__ == "__main__":
     if config['mqtt_username'] and config['mqtt_password']:
         client.username_pw_set(username=config['mqtt_username'], password=config['mqtt_password'])
     client.on_connect = on_connect
-    client.on_disconnect = on_connect
+    client.on_disconnect = on_disconnect
     client.on_message = on_message
 
     # sensor parser
