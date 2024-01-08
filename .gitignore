@@ -127,6 +127,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+vi/
 
 # Spyder project settings
 .spyderproject
@@ -164,3 +165,5 @@ w $ git rm enocean-gw-config.yml
 enocean-gw-config.yml
 enocean_sensors.yml
 
+# vim swap files
+.swp

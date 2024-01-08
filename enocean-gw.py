@@ -35,8 +35,6 @@ class MQTTmessage(object):
                 topic += f'/'
             topic += f'{self.sub_topic.replace(" ", "_")}'
         if self.msg:
-            if topic[-1] != '/':
-                topic += f'/'
             return (topic, self.msg)
         return None
     
@@ -49,7 +47,19 @@ class SensorParser(object):
     def __init__(self, sensors, main_topic = "enocean"):
         self.sensors = sensors
         self.main_topic = main_topic
-        self.mqtt_message = MQTTmessage(main_topic=self.main_topic, topic="sensor")
+        self.mqtt_messages = []   # list of MQTTmessages
+
+    def add_message(self, sub_topic=None, message = None):
+        # add a MQTT message to self.mqtt_messages
+        msg = MQTTmessage(main_topic=self.main_topic, topic="sensor")
+        if sub_topic:
+            msg.sub_topic = sub_topic
+        if message:
+            msg.msg = message
+            self.mqtt_messages.append(msg)
+            return True
+        # didn't add message
+        return False
         
     def process_telegram(self, telegram):
         # check telegram for a matching sender id
@@ -61,26 +71,62 @@ class SensorParser(object):
                     sensor_name = sensor['name']
                 else:
                     sensor_name = telegram.packet.sender_id.replace(":","")
-                if telegram.packet.telegram_data in sensor['packet_type'][telegram.packet.packet_type]:
-                    self.mqtt_message.sub_topic = sensor_name
-                    self.mqtt_message.msg = sensor['packet_type'][telegram.packet.packet_type][telegram.packet.telegram_data]
-                    return
+                if 'telegram_type' in sensor['packet_type'][telegram.packet.packet_type]:
+                    if telegram.packet.telegram_type in ['RPS', '1BS']:
+                       # simple one byte packet, publish the result according to the sensor config
+                        #self.mqtt_message.sub_topic = sensor_name
+                        #self.mqtt_message.msg = sensor['packet_type'][telegram.packet.packet_type]['telegram_type'][telegram.packet.telegram_type][telegram.packet.telegram_data]
+                        self.add_message( sub_topic = sensor_name,
+                                          message = sensor['packet_type'][telegram.packet.packet_type]['telegram_type'][telegram.packet.telegram_type][telegram.packet.telegram_data]
+                                        )
+                        return
+                    if telegram.packet.telegram_type == '4BS':
+                       # pull out the telegram info into another variable to make this easier to code and comprehend
+                       telegram_actions = sensor['packet_type'][telegram.packet.packet_type]['telegram_type'][telegram.packet.telegram_type]
+                       # check for any match conditions
+                       matched = []   # boolean field to check for truthiness
+                       if 'match' in telegram_actions:
+                           for byte_pos in telegram_actions['match']:
+                               if getattr(telegram.packet, byte_pos) == telegram_actions['match'][byte_pos]:
+                                   matched.append(True)
+                               else:
+                                   matched.append(False)
+                       if any(matched):
+                           # send values as MQTT messages
+                           for byte_pos in telegram_actions['values']:
+                               myvalue = getattr(telegram.packet, byte_pos) 
+                               self.add_message( sub_topic = f"{sensor_name}/{telegram_actions['values'][byte_pos]}",
+                                                 message = f"{myvalue}"
+                                               )
+                               #self.mqtt_message.sub_topic = f"{sensor_name}/{telegram_actions['values'][byte_pos]}"
+                               #self.mqtt_message.msg = f"{myvalue}"
+                           return
+                       
+
                 # unkown value
                 self.mqtt_message.sub_topic = f"unknown_value/{sensor_name}"
-                self.mqtt_message.msg = f"{hex(telegram.packet.telegram_data)}"
+                # convert telegram data to a hex stream
+                if isinstance( telegram.packet.telegram_data, int):
+                    telegram_data = hex(telegram.packet.telegram_data)
+                if isinstance(telegram.packet.telegram_data, bytes):
+                    telegram_data = telegram.packet.telegram_data.hex()
+                self.add_message( message = f"{telegram_data}")
+                #self.mqtt_message.msg = f"{telegram_data}"
                 return
             # unkown packet type
             if 'name' in sensor:
                 sensor_name = sensor['name']
             else:
                 sensor_name = telegram.packet.sender_id.replace(":","")
-            self.mqtt_message.sub_topic = f"unknown_packet_type/{sensor_name}"
-            self.mqtt_message.msg = f"{telegram.packet.packet_type} from {telegram.packet.sender_id}"
+            self.add_message( sub_topic = f"unknown_packet_type/{sensor_name}", 
+                              message = f"{telegram.packet.packet_type} from {telegram.packet.sender_id}"
+                            )
             return
 
         # report a unknown sensor sending data
-        self.mqtt_message.sub_topic = 'unknown_sender'
-        self.mqtt_message.msg = f"{telegram.packet.sender_id}"
+        self.add_message( sub_topic = 'unknown_sender',
+                          message = f"{telegram.packet.sender_id}"
+                        )
         return
 
 
@@ -99,33 +145,52 @@ class RadioErp1(object):
         self.data = data
         self.optional_data = optional_data 
         self.rorg = None
+        self.telegram_type = None
         self.telegram_data = None
+        # telegram data bytes for 4 4BS type
+        self.db0 = None
+        self.db1 = None
+        self.db2 = None
+        self.db3 = None
         self.sender_id = None
         self.status = None
         # figure out the RORG, first byte of the data
         self.rorg_id()
 
     def __str__(self):
-        output = f"{self.packet_type}:{self.rorg}:DATA BYTE {self.telegram_data}: Sender ID {self.sender_id}"
+        if self.telegram_data and not self.db0:
+            output = f"{self.packet_type}:{self.rorg}:DATA BYTE {self.telegram_data}: Sender ID {self.sender_id}"
+        else:
+            output = f"{self.packet_type}:{self.rorg}:DATA BYTES {self.telegram_data.hex()}: Sender ID {self.sender_id}"
         output += f" status: {self.status}"
         return output
 
     def rorg_id(self):
         if self.data[0] == 0xf6:
             self.rorg = "RPS Teach-in"
+            self.telegram_type = "RPS"
             self.process_teach_in()
         elif self.data[0] == 0xd5:
             self.rorg = "1BS Teach-in"
+            self.telegram_type = "1BS"
             self.process_teach_in()
         elif self.data[0] == 0xa5:
             self.rorg = "4BS Teach-in"
+            self.telegram_type = "4BS"
             self.process_teach_in(len=4)
         else:
             print (f"RORG UNKNOWN {self.data[0]:02x}")
 
     def process_teach_in(self, len=2):
         # RPA Tech in parsing
-        self.telegram_data = self.data[1]  
+        if len == 2:
+            self.telegram_data = self.data[1]  
+        if len == 4:
+            self.telegram_data = self.data[1:5]  
+            self.db0 = self.data[4]
+            self.db1 = self.data[3]
+            self.db2 = self.data[2]
+            self.db3 = self.data[1]
         # turn the sender id in to a MAC like address string
         self.sender_id = ""
         for octet in self.data[-5:-1]:
@@ -210,7 +275,7 @@ class EnoceanTelegram(object):
         output += "| "
         for mybyte in self.optional_data:
            output += f"{mybyte:02x} "
-        output += f"| {self.crc8.hex()}   ]\n"
+        output += f"| {self.crc8.hex()}   ]"
         return output
 
     def calc_header_crc8(self):
@@ -278,17 +343,21 @@ def main():
             if mybyte == sync_byte:
                 # print ("SYNC:", mybyte.hex())
                 telegram = EnoceanTelegram(ser)
-                try:
+                #try:
+                if True:
                     telegram.read()
                     telegram.process()
                     sensors.process_telegram(telegram)
-                except Exception as err:
-                    print (f"Telgram issue: {err}")
+                #except Exception as err:
+                if False:
+                    print (f"Telegram issue: {err}")
                     #client.publish("enocean/crc8", f"{err}")
-                if sensors.mqtt_message.message:
-                    print (telegram)
-                    print ("PUBLISH:", sensors.mqtt_message.message[0], sensors.mqtt_message.message[1])
-                    client.publish(sensors.mqtt_message.message[0], sensors.mqtt_message.message[1])
+                print (telegram)
+                #print (telegram.packet)
+                while sensors.mqtt_messages:
+                    mqtt_message = sensors.mqtt_messages.pop()
+                    print ("PUBLISH:", mqtt_message.message[0], mqtt_message.message[1], '\n')
+                    client.publish(mqtt_message.message[0], mqtt_message.message[1], qos=0, retain=True)
                 client.publish("enocean/telegram", str(telegram))
             else:
                 client.publish("enocean/debug", str("EXTRANDOUS CRAP"))
@@ -308,6 +377,11 @@ if __name__ == "__main__":
     # load config
     with open(args.config_file, 'r') as fd:
         config = yaml.safe_load(fd)
+
+    print (config)
+    if 'homeassistant' in config and config['homeassistant']:
+        print ("Home Assistant Auto Discovery Enabled")
+        
 
     if 'client_id' in config:
         client_id = config['client_id']
