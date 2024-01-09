@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Documents 
+Relevant Reference Documents 
 https://advanceddevices.com/sites/default/files/documents/EnOcean%20Radio%20Prootocol%201.pdf
 https://www.enocean-alliance.org/wp-content/uploads/2020/07/EnOcean-Equipment-Profiles-3-1.pdf
 """
@@ -16,11 +16,12 @@ import sys
 sync_byte = b'\x55'
 
 class MQTTmessage(object):
-    def __init__(self, main_topic='enocean', topic=None, sub_topic=None, msg = ""):
+    def __init__(self, main_topic='enocean', topic=None, sub_topic=None, msg = "", homeassistant=False):
         self.main_topic = main_topic
         self.topic = topic
         self.sub_topic = sub_topic
         self.msg = msg
+        self.homeassistant = homeassistant
 
     @property
     def message(self):
@@ -49,11 +50,13 @@ class SensorParser(object):
         self.main_topic = main_topic
         self.mqtt_messages = []   # list of MQTTmessages
 
-    def add_message(self, sub_topic=None, message = None):
+    def add_message(self, sub_topic=None, message = None, topic=None, homeassistant=False):
         # add a MQTT message to self.mqtt_messages
-        msg = MQTTmessage(main_topic=self.main_topic, topic="sensor")
+        msg = MQTTmessage(main_topic=self.main_topic, homeassistant=False)
         if sub_topic:
             msg.sub_topic = sub_topic
+        if homeassistant:
+            self.main_topic = "homeassistant"
         if message:
             msg.msg = message
             self.mqtt_messages.append(msg)
@@ -95,7 +98,12 @@ class SensorParser(object):
                            # send values as MQTT messages
                            for byte_pos in telegram_actions['values']:
                                myvalue = getattr(telegram.packet, byte_pos) 
-                               self.add_message( sub_topic = f"{sensor_name}/{telegram_actions['values'][byte_pos]}",
+                               if 'name' in telegram_actions['values'][byte_pos]:
+                                   value_name = telegram_actions['values'][byte_pos]['name']
+                               else:
+                                   value_name = f"{byte_pos}"
+                               
+                               self.add_message( sub_topic = f"{sensor_name}/{value_name}",
                                                  message = f"{myvalue}"
                                                )
                                #self.mqtt_message.sub_topic = f"{sensor_name}/{telegram_actions['values'][byte_pos]}"
@@ -327,6 +335,94 @@ def on_disconnect(client, userdata, rc):
 def on_message(client, userdata, msg):
     print(msg.topic+" "+str(msg.payload))
 
+
+class HomeAssistantObject(object):
+
+    def __init__(self, discovery_prefix):
+        self.discovery_prefix = discovery_prefix
+        self.object_id = None
+        self.component = None
+        self.placeholder_message = None
+        self.binary_sensor = ""
+        self.voltage = ""
+
+    @property
+    def topic(self):
+        return f"{self.discovery_prefix}/{self.component}/{self.object_id}/config"
+
+
+    
+
+
+class HomeAssitantIntegrator(object):
+    """
+    Create integration messages for Home Assistant auto discovery based on the sensors config
+
+    The discovery topic needs to follow a specific format:
+    
+    <discovery_prefix>/<component>/[<node_id>/]<object_id>/config
+    Text
+    <discovery_prefix>: The Discovery Prefix defaults to homeassistant. This prefix can be changed.
+    <component>: One of the supported MQTT integrations, eg. binary_sensor.
+    <node_id> (Optional): ID of the node providing the topic, this is not used by Home Assistant but may be used to structure the MQTT topic. The ID of the node must only consist of characters from the character class [a-zA-Z0-9_-] (alphanumerics, underscore and hyphen).
+    <object_id>: The ID of the device. This is only to allow for separate topics for each device and is not used for the entity_id. The ID of the device must only consist of characters from the character class [a-zA-Z0-9_-] (alphanumerics, underscore and hyphen).
+    The <node_id> level can be used by clients to only subscribe to their own (command) topics by using one wildcard topic like <discovery_prefix>/+/<node_id>/+/set.
+    
+    Best practice for entities with a unique_id is to set <object_id> to unique_id and omit the <node_id>.
+
+    """
+    def __init__(self, sensors, client=None):
+        self.sensors = sensors
+        self.client = client
+        self.discovery_prefix = 'homeassistant'
+        self.messages = []
+
+    
+    def parse(self):
+        for sensor, sensor_data in self.sensors.items():
+            mysensor = HomeAssistantObject(self.discovery_prefix)
+            mysensor.object_id = sensor.replace(":","")
+            # get the telegram types
+            for packet_type in sensor_data['packet_type']:
+                print ("PT:", packet_type)
+                for telegram_type in sensor_data['packet_type'][packet_type]['telegram_type']:
+                   print ("TT:", telegram_type)
+                   if telegram_type in ['1BS', 'RPS']:
+                       mysensor = HomeAssistantObject(self.discovery_prefix)
+                       mysensor.component = sensor_data['packet_type'][packet_type]['telegram_type'][telegram_type]['integration']
+                       mysensor.object_id = sensor.replace(":","")
+                       mysensor.object_id += telegram_type
+                       self.messages.append(mysensor)
+                   if telegram_type == '4BS':
+                       print ("senser data:", sensor_data)
+                       print ("senser data2222:", sensor_data['packet_type'][packet_type]['telegram_type'][telegram_type]['values'])
+                       for db in sensor_data['packet_type'][packet_type]['telegram_type'][telegram_type]['values']:
+                           mysensor = HomeAssistantObject(self.discovery_prefix)
+                           mysensor.component = sensor_data['packet_type'][packet_type]['telegram_type'][telegram_type]['values'][db]['integration']
+                           mysensor.object_id = sensor.replace(":","")
+                           mysensor.object_id += f"{telegram_type}{db}"
+                           self.messages.append(mysensor)
+            
+            
+
+    def publish(self):
+        self.parse()
+        for message in self.messages:
+            print (f"PUBLISH: {message.topic}")
+
+
+"""
+                               print ("BYTE_POS:", byte_pos)
+                               if 'integration' in telegram_actions['values'][byte_pos]:
+                                   print ("HA INTEGRATINO TYPE:", telegram_actions['values'][byte_pos]['integration']) 
+                                   integration_type = telegram_actions['values'][byte_pos]['integration']
+                                   # publish in home assistant
+                                   self.add_message( sub_topic = f"{integration_type}/{sensor_name}",
+                                                     message = f"{myvalue}",
+                                                     homeassistant = True,
+                                                   )
+"""
+
 def main():
     try:
         client.connect(config['mqtt_server'], config['mqtt_port'], 60)
@@ -378,9 +474,10 @@ if __name__ == "__main__":
     with open(args.config_file, 'r') as fd:
         config = yaml.safe_load(fd)
 
-    print (config)
-    if 'homeassistant' in config and config['homeassistant']:
-        print ("Home Assistant Auto Discovery Enabled")
+    # sensor parser
+    with open(config['sensors_file'], 'r') as fd:
+        sensor_data = yaml.safe_load(fd)
+
         
 
     if 'client_id' in config:
@@ -388,6 +485,15 @@ if __name__ == "__main__":
     else:
         client_id = "enocean-mqtt-gw"
     client = mqtt.Client(client_id=client_id)
+
+    # HA autodicovery
+    print (config)
+    if 'homeassistant' in config and config['homeassistant']:
+        print ("Home Assistant Auto Discovery Enabled")
+        ha = HomeAssitantIntegrator(sensor_data, client=client)
+        ha.publish()
+
+    print (ha.sensors)
     if config['mqtt_username'] and config['mqtt_password']:
         client.username_pw_set(username=config['mqtt_username'], password=config['mqtt_password'])
     client.on_connect = on_connect
@@ -400,6 +506,3 @@ if __name__ == "__main__":
     sensors = SensorParser(sensor_data)
     
     main()
-   
-
-
