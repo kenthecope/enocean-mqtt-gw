@@ -50,13 +50,11 @@ class SensorParser(object):
         self.main_topic = main_topic
         self.mqtt_messages = []   # list of MQTTmessages
 
-    def add_message(self, sub_topic=None, message = None, topic=None, homeassistant=False):
+    def add_message(self, sub_topic=None, message = None, topic=None):
         # add a MQTT message to self.mqtt_messages
-        msg = MQTTmessage(main_topic=self.main_topic, homeassistant=False)
+        msg = MQTTmessage(main_topic=self.main_topic)
         if sub_topic:
             msg.sub_topic = sub_topic
-        if homeassistant:
-            self.main_topic = "homeassistant"
         if message:
             msg.msg = message
             self.mqtt_messages.append(msg)
@@ -76,10 +74,13 @@ class SensorParser(object):
                     sensor_name = telegram.packet.sender_id.replace(":","")
                 if 'telegram_type' in sensor['packet_type'][telegram.packet.packet_type]:
                     if telegram.packet.telegram_type in ['RPS', '1BS']:
-                       # simple one byte packet, publish the result according to the sensor config
-                        #self.mqtt_message.sub_topic = sensor_name
-                        #self.mqtt_message.msg = sensor['packet_type'][telegram.packet.packet_type]['telegram_type'][telegram.packet.telegram_type][telegram.packet.telegram_data]
-                        self.add_message( sub_topic = sensor_name,
+                        # simple one byte packet, publish the result according to the sensor config
+                        # get sensor integration (sensor type) if available
+                        if 'integration' in sensor['packet_type'][telegram.packet.packet_type]['telegram_type'][telegram.packet.telegram_type]:
+                            sensor_type = sensor['packet_type'][telegram.packet.packet_type]['telegram_type'][telegram.packet.telegram_type]['integration'].lower()
+                        else:
+                            sensor_type = 'sensor'
+                        self.add_message( sub_topic = f"{sensor_type}/{sensor_name}",
                                           message = sensor['packet_type'][telegram.packet.packet_type]['telegram_type'][telegram.packet.telegram_type][telegram.packet.telegram_data]
                                         )
                         return
@@ -98,16 +99,18 @@ class SensorParser(object):
                            # send values as MQTT messages
                            for byte_pos in telegram_actions['values']:
                                myvalue = getattr(telegram.packet, byte_pos) 
+                               if 'integration' in telegram_actions['values'][byte_pos]:
+                                   sensor_type = telegram_actions['values'][byte_pos]['integration'].lower()
+                               else:
+                                   sensor_type = 'sensor'
                                if 'name' in telegram_actions['values'][byte_pos]:
                                    value_name = telegram_actions['values'][byte_pos]['name']
                                else:
                                    value_name = f"{byte_pos}"
                                
-                               self.add_message( sub_topic = f"{sensor_name}/{value_name}",
+                               self.add_message( sub_topic = f"{sensor_type}/{sensor_name}/{value_name}",
                                                  message = f"{myvalue}"
                                                )
-                               #self.mqtt_message.sub_topic = f"{sensor_name}/{telegram_actions['values'][byte_pos]}"
-                               #self.mqtt_message.msg = f"{myvalue}"
                            return
                        
 
@@ -326,6 +329,8 @@ class EnoceanTelegram(object):
     
 def on_connect(client, userdata, flags, rc):
     print("MQTT Connected with result code "+str(rc))
+    # birth message
+    client.publish("enocean/status", "available", 0, False)
 
 def on_disconnect(client, userdata, rc):
     if rc != 0:
@@ -429,7 +434,6 @@ def main():
     except ConnectionRefusedError as err:
         print (f"Connection Refused to {config['mqtt_server']} on port {config['mqtt_port']} - will auto reconnect")
     client.loop_start()
-    client.publish("enocean/status", "UP")
     with serial.Serial(config['enocean_device'], 57200) as ser:
         while True:
             # listen for sync byte
@@ -484,7 +488,9 @@ if __name__ == "__main__":
         client_id = config['client_id']
     else:
         client_id = "enocean-mqtt-gw"
-    client = mqtt.Client(client_id=client_id)
+    client = mqtt.Client(client_id=client_id, clean_session=True )
+    # set the last will message that we are now unavailable
+    client.will_set("enocean/status", "unavailable", 0, False)
 
     # HA autodicovery
     print (config)
