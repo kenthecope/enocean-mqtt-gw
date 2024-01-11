@@ -86,7 +86,12 @@ class SensorParser(object):
                         return
                     if telegram.packet.telegram_type == '4BS':
                        # pull out the telegram info into another variable to make this easier to code and comprehend
-                       telegram_actions = sensor['packet_type'][telegram.packet.packet_type]['telegram_type'][telegram.packet.telegram_type]
+                       try:
+                           telegram_actions = sensor['packet_type'][telegram.packet.packet_type]['telegram_type'][telegram.packet.telegram_type]
+                       except:
+                           # telegram type not defined in sensors yaml file
+                           print ("No 4BS telegram type action defined.")
+                           return
                        # check for any match conditions
                        matched = []   # boolean field to check for truthiness
                        if 'match' in telegram_actions:
@@ -330,7 +335,7 @@ class EnoceanTelegram(object):
 def on_connect(client, userdata, flags, rc):
     print("MQTT Connected with result code "+str(rc))
     # birth message
-    client.publish("enocean/status", "available", 0, False)
+    client.publish("enocean/status", "online", 0, True)
 
 def on_disconnect(client, userdata, rc):
     if rc != 0:
@@ -490,7 +495,7 @@ if __name__ == "__main__":
         client_id = "enocean-mqtt-gw"
     client = mqtt.Client(client_id=client_id, clean_session=True )
     # set the last will message that we are now unavailable
-    client.will_set("enocean/status", "unavailable", 0, False)
+    client.will_set("enocean/status", "offline", 0, False)
 
     # HA autodicovery
     print (config)
