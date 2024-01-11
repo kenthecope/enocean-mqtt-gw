@@ -9,8 +9,10 @@ import serial
 import crc8
 import paho.mqtt.client as mqtt
 import yaml
+import json
 import argparse
 import sys
+from socket import gaierror
 
 # EnOcean sync byte
 sync_byte = b'\x55'
@@ -333,7 +335,7 @@ class EnoceanTelegram(object):
         raise Exception(f"Unknown Packet type: {self.packet_type.hex()}")
     
 def on_connect(client, userdata, flags, rc):
-    print("MQTT Connected with result code "+str(rc))
+    print(f"MQTT Connected to {client._host} on port {client._port} with result code {rc} ")
     # birth message
     client.publish("enocean/status", "online", 0, True)
 
@@ -352,15 +354,35 @@ class HomeAssistantObject(object):
         self.discovery_prefix = discovery_prefix
         self.object_id = None
         self.component = None
+        self.name = None
+        self.db = None
+        self.db_name = None
+        self.telegram_type = None
         self.placeholder_message = None
-        self.binary_sensor = ""
-        self.voltage = ""
 
     @property
     def topic(self):
         return f"{self.discovery_prefix}/{self.component}/{self.object_id}/config"
 
-
+    @property
+    def message(self):
+        if self.component == 'binary_sensor':
+            component = self.component
+        else:
+            component = 'sensor'
+        payload = { component : 
+                        {'name': f"{self.name}_{self.component}",
+                        'state_topic': f'enocean/{self.component}/{self.name}',
+                        'unique_id': f"{self.object_id}_{self.telegram_type}_{self.db}",
+                        'availability_topic': "enocean/status",
+                        }
+                  }
+        if self.component == 'voltage':
+            payload[component]['unit_of_measurement'] =  "V" 
+            payload[component]['device_class'] =  "voltage"
+            payload[component]['state_topic'] +=  f"/{self.db_name}" 
+            
+        return json.dumps(payload)
     
 
 
@@ -394,50 +416,45 @@ class HomeAssitantIntegrator(object):
             mysensor.object_id = sensor.replace(":","")
             # get the telegram types
             for packet_type in sensor_data['packet_type']:
-                print ("PT:", packet_type)
                 for telegram_type in sensor_data['packet_type'][packet_type]['telegram_type']:
-                   print ("TT:", telegram_type)
                    if telegram_type in ['1BS', 'RPS']:
                        mysensor = HomeAssistantObject(self.discovery_prefix)
                        mysensor.component = sensor_data['packet_type'][packet_type]['telegram_type'][telegram_type]['integration']
+                       mysensor.telegram_type = telegram_type
+                       mysensor.db = "01"
+                       mysensor.name = sensor_data['name']
                        mysensor.object_id = sensor.replace(":","")
                        mysensor.object_id += telegram_type
                        self.messages.append(mysensor)
                    if telegram_type == '4BS':
-                       print ("senser data:", sensor_data)
-                       print ("senser data2222:", sensor_data['packet_type'][packet_type]['telegram_type'][telegram_type]['values'])
                        for db in sensor_data['packet_type'][packet_type]['telegram_type'][telegram_type]['values']:
                            mysensor = HomeAssistantObject(self.discovery_prefix)
+                           mysensor.name = sensor_data['name']
+                           mysensor.telegram_type = telegram_type
+                           mysensor.db = db
                            mysensor.component = sensor_data['packet_type'][packet_type]['telegram_type'][telegram_type]['values'][db]['integration']
+                           mysensor.db_name = sensor_data['packet_type'][packet_type]['telegram_type'][telegram_type]['values'][db]['name']
                            mysensor.object_id = sensor.replace(":","")
                            mysensor.object_id += f"{telegram_type}{db}"
                            self.messages.append(mysensor)
-            
             
 
     def publish(self):
         self.parse()
         for message in self.messages:
-            print (f"PUBLISH: {message.topic}")
+            if self.client:
+                self.client.publish(message.topic, message.message, 0, True)
+        
 
-
-"""
-                               print ("BYTE_POS:", byte_pos)
-                               if 'integration' in telegram_actions['values'][byte_pos]:
-                                   print ("HA INTEGRATINO TYPE:", telegram_actions['values'][byte_pos]['integration']) 
-                                   integration_type = telegram_actions['values'][byte_pos]['integration']
-                                   # publish in home assistant
-                                   self.add_message( sub_topic = f"{integration_type}/{sensor_name}",
-                                                     message = f"{myvalue}",
-                                                     homeassistant = True,
-                                                   )
-"""
 
 def main():
     try:
-        client.connect(config['mqtt_server'], config['mqtt_port'], 60)
+        client.connect(config['mqtt_server'], mqtt_port, 60)
     except ConnectionRefusedError as err:
         print (f"Connection Refused to {config['mqtt_server']} on port {config['mqtt_port']} - will auto reconnect")
+    except gaierror:
+        print (f"Cannot resolve host {config['mqtt_server']}")
+        sys.exit(1)
     client.loop_start()
     with serial.Serial(config['enocean_device'], 57200) as ser:
         while True:
@@ -448,17 +465,14 @@ def main():
             if mybyte == sync_byte:
                 # print ("SYNC:", mybyte.hex())
                 telegram = EnoceanTelegram(ser)
-                #try:
-                if True:
+                try:
                     telegram.read()
                     telegram.process()
                     sensors.process_telegram(telegram)
-                #except Exception as err:
-                if False:
+                except Exception as err:
                     print (f"Telegram issue: {err}")
-                    #client.publish("enocean/crc8", f"{err}")
+                    client.publish("enocean/crc8", f"{err}")
                 print (telegram)
-                #print (telegram.packet)
                 while sensors.mqtt_messages:
                     mqtt_message = sensors.mqtt_messages.pop()
                     print ("PUBLISH:", mqtt_message.message[0], mqtt_message.message[1], '\n')
@@ -480,13 +494,32 @@ if __name__ == "__main__":
     args = parser.parse_args()
  
     # load config
-    with open(args.config_file, 'r') as fd:
-        config = yaml.safe_load(fd)
+    try:
+        with open(args.config_file, 'r') as fd:
+            config = yaml.safe_load(fd)
+    except (yaml.scanner.ScannerError, yaml.parser.ParserError) as err:
+        print (f"ERROR: Cannot load config file due to YAML problems: {err} -  {err.problem_mark}")
+        sys.exit(1)
+    except FileNotFoundError as err:
+        print (f"ERROR: Can not locate config file {config['sensors_file']}")
+        sys.exit(1)
+    except Exception as err:
+        print (f"ERROR: {err}")
+        sys.exit(1)
 
     # sensor parser
-    with open(config['sensors_file'], 'r') as fd:
-        sensor_data = yaml.safe_load(fd)
-
+    try:
+        with open(config['sensors_file'], 'r') as fd:
+            sensor_data = yaml.safe_load(fd)
+    except (yaml.scanner.ScannerError, yaml.parser.ParserError) as err:
+        print (f"ERROR: Cannot load sensors YAML: {err} -  {err.problem_mark}")
+        sys.exit(1)
+    except FileNotFoundError as err:
+        print (f"ERROR: Can not locate sensors file {config['sensors_file']}")
+        sys.exit(1)
+    except Exception as err:
+        print (f"ERROR: {err}")
+        sys.exit(1)
         
 
     if 'client_id' in config:
@@ -498,13 +531,31 @@ if __name__ == "__main__":
     client.will_set("enocean/status", "offline", 0, False)
 
     # HA autodicovery
-    print (config)
+    # print (config)
     if 'homeassistant' in config and config['homeassistant']:
         print ("Home Assistant Auto Discovery Enabled")
         ha = HomeAssitantIntegrator(sensor_data, client=client)
         ha.publish()
+ 
+    # input checking
+    if 'mqtt_server' not in config:
+        print ("ERROR: no mqtt_server defined!")
+        sys.exit(1)
 
-    print (ha.sensors)
+    def report_port_error(port):
+        print ("mqtt_port {port} in {args.config_file} is not an integer between 1 and 65535!")
+        sys.exit(1)
+
+    if 'mqtt_port' not in config:
+        mqtt_port = 1883
+    elif not isinstance(config['mqtt_port'], int): 
+        report_port_error(config['mqtt_port'])
+    elif config['mqtt_port'] < 1 or config['mqtt_port'] > 65535:
+        report_port_error(config['mqtt_port'])
+    else:
+        mqtt_port = config['mqtt_port']
+        
+
     if config['mqtt_username'] and config['mqtt_password']:
         client.username_pw_set(username=config['mqtt_username'], password=config['mqtt_password'])
     client.on_connect = on_connect
